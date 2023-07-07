@@ -1,0 +1,374 @@
+---
+title: "Análisis y Clústers con Enfoque a Clientes"
+author: "Data Genies"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(dplyr,magrittr,tidyverse,caret)
+```
+
+
+```{r}
+base <- readxl::read_xlsx("/Users/carolina/Desktop/dataton/dataset.xlsx")
+```
+
+Datos a analizar, país (el nombre del país entero) y contiente fueron imputados en excel.
+```{r}
+str(base)
+```
+
+# Limpieza e Imputación de Datos
+
+## Correción de Tipo
+Como cambiamos el csv a un xlsx la fecha se carga como tipo POSIXct. Quedan las columnas caracteres que deberían de ser factores.
+```{r}
+factores <- c("tipo_transaccion","ope_pais","entry_mode","sexo_cliente",
+              "estado_cliente","continente","pais","giro_nombre")
+base[factores] <- lapply(base[factores], as.factor)
+rm(factores)
+```
+
+## Na's
+Haciendo una previsualización de los datos sabemos que hay registros en sexo_cliente con un espacio, por lo que se reemplazarán por na's
+```{r}
+base  %<>%  mutate(sexo_cliente= as.factor(ifelse(sexo_cliente=="F","F",ifelse(sexo_cliente=="M","M",NA))))
+```
+
+Como podemos ver, hay 300 registros en sexo_cliente con nas.
+```{r}
+colSums(is.na(base))
+```
+Para reemplazarlos se usará la moda. Como podemos ver, son solo 9 clientes sin sexo. la edad de los clientes es menor a 18. Este es un error que se arreglará después. Por mientras, usaremos la moda de todos los clientes abajo de 18
+```{r}
+nas <- base %>% select(id_cliente,sexo_cliente,edad_cliente) %>% filter(is.na(sexo_cliente))
+nas <- distinct(nas)
+nas
+```
+Primero filtramos para solo incluir menores (sin estos 9 clientes) y usamos una función para calcular la moda.
+```{r}
+menores <- base %>% filter(edad_cliente < 18) %>% select(sexo_cliente) %>% filter(!is.na(sexo_cliente))
+menores <- distinct(menores)
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]}
+```
+
+```{r}
+base$sexo_cliente[which(is.na(base$sexo_cliente))]= getmode(menores$sexo_cliente)
+rm(menores,nas)
+```
+Ya se corrigieron los na's.
+```{r}
+colSums(is.na(base))
+```
+
+## Outliers en edad (menores a 18 y edad en 123)
+Como podemos observar, hay 84 clientes con edad menor a 18. 
+```{r}
+menores <-  base %>% filter(edad_cliente < 18) 
+menores %>% count(id_cliente)
+```
+De estos, hay 5 clientes que usan tarjeta de crédito. Estos se excluirán de la base de datos. Los otros registros se reemplazarán por la media (excluyendo outliers)
+```{r}
+menores_tdc <- menores %>% filter(tipo_transaccion=="TDC")
+menores_tdc %>% count(id_cliente)
+```
+```{r}
+base <- base %>% filter(!id_cliente%in%c("982","1410","2617","5530","6458")) #144 transacciones
+```
+
+Ahora, hay 43 clientes con edad en 123. Estos también se reemplazarán por la media (excluyendo outliers).
+
+```{r}
+base %>% filter(edad_cliente > 85)  %>% count(id_cliente,edad_cliente)
+```
+
+La media es 33
+```{r}
+base %>% filter(edad_cliente > 17 & edad_cliente < 85) %>% summarise(m = round(mean(edad_cliente),0))
+```
+
+```{r}
+base <- base %>% mutate(edad_cliente = ifelse(edad_cliente > 85 | edad_cliente < 18,33,edad_cliente))
+```
+
+
+## Fechas
+De la fecha de transacción se generará el año, mes, hora y horario de la transacción.
+```{r}
+base %<>% mutate( año = as.factor(format(fecha_transaccion, "%Y")),
+                mes = as.factor(format(fecha_transaccion, "%m")),
+                hora = as.numeric(format(fecha_transaccion, "%H"))) %>%
+  mutate(horarios=as.factor(ifelse(hora > 11,"PM","AM")))
+```
+
+
+## region
+Se usará estado_cliente para crear la variable Región: Centro, Centro Norte, Norte, Sur
+```{r}
+levels(base$estado_cliente)
+```
+
+
+
+```{r}
+base  %<>%  mutate(Region= as.factor(ifelse(estado_cliente%in%c("CIUDAD DE MEXICO", "MEXICO", "GUANAJUATO",
+                                                         "HIDALGO", "MORELOS", "PUEBLA", "QUERETARO","TLAXCALA"),"Centro", 
+                                            
+                                            ifelse(estado_cliente%in%c("AGUASCALIENTES", "BAJA CALIFORNIA SUR", "COLIMA", "DURANGO", 
+                                                                "JALISCO","MICHOACAN DE OCAMPO", "NAYARIT",
+                                                                
+                                                                "SAN LUIS POTOSI", "SINALOA", "ZACATECAS"),"Centro Norte",
+                                                   
+                                                   ifelse(estado_cliente%in% c("CAMPECHE","CHIAPAS","GUERRERO","OAXACA","QUINTANA ROO",
+                                                                        "TABASCO","VERACRUZ DE IGNACIO DE LA LLAV","YUCATAN"),"Sur",
+                                                          
+                                                          ifelse(estado_cliente%in%c("BAJA CALIFORNIA","CHIHUAHUA",
+                                                                                     "COAHUILA DE ZARAGOZA", "NUEVO LEON",
+                                                                              "SONORA", "TAMAULIPAS" ),"Norte","Otro"))))))
+
+```
+## Giro Nombre
+Con giro nombre se generarán 2 nuevas variables. La primera mide si el giro del lugar de la transacción es de gasto hormiga o masivo. Como tal, no hay una respuesta precisa para determinar qué giros de negocio pueden considerarse como comercio hormiga, ya que depende del contexto y la perspectiva desde la cual se esté analizando. Sin embargo, se puede considerar que los giros de negocio que involucran transacciones frecuentes y pequeñas cantidades de dinero.
+```{r}
+base %<>% 
+  mutate(hormiga = fct_collapse(giro_nombre,
+                         Masivo =  c("AGENCIAS DE VIAJES","AGREGADOR","ASEGURADORAS","BENEFICENCIA","COLEGIOS Y UNIVERSIDADES",
+                                     "EDUCACIN BASICA","GOBIERNO","GUARDERIAS","HOSPITALES","HOTELES","MEDICOS Y DENTISTAS",
+                                     "OTROS","REFACCIONES Y FERRETERIA","RENTA DE AUTOS","RESTAURANTE","RETAIL",
+                                     "TELECOMUNICACIONES","TRANSPORTE AEREO"),
+                         Hormiga = c("COMIDA RAPIDA","ENTRETENIMIENTO","ESTACIONAMIENTOS","FARMACIAS","GASOLINERAS",
+                                     "MISCELANEAS","PEAJE","SALONES DE BELLEZA","SUPERMERCADOS",
+                                     "TRANSPORTE TERRESTRE DE PASAJEROS")))
+```
+La segunda es negocio, la cual resume el giro a 5 tipos.
+```{r}
+base %<>% 
+  mutate(negocio = fct_collapse(giro_nombre,
+                         consumo_masivo =  c("COMIDA RAPIDA", "SUPERMERCADOS", "FARMACIAS","MISCELANEAS","RETAIL",
+                                             "GASOLINERAS","REFACCIONES Y FERRETERIA"),
+                         servicios = c("AGENCIAS DE VIAJES", "ASEGURADORAS", "ENTRETENIMIENTO","SALONES DE BELLEZA",
+                                       "TELECOMUNICACIONES","HOSPITALES","MEDICOS Y DENTISTAS"),
+                         hospitalidad = c("HOTELES", "RESTAURANTE", "RENTA DE AUTOS"),
+                         educativos = c("COLEGIOS Y UNIVERSIDADES", "EDUCACIN BASICA", "GUARDERIAS"),
+                         transporte = c("TRANSPORTE AEREO", "TRANSPORTE TERRESTRE DE PASAJEROS", "ESTACIONAMIENTOS", "PEAJE"),
+                         otros = c("OTROS", "GOBIERNO", "AGREGADOR", "BENEFICENCIA")))
+```
+
+# cor
+
+Ahora se hizo una correlación entre las variables.
+```{r}
+cor <- base %>% dplyr::select(-ope_pais,-mcc_nombre,-nombre_comercio,-giro_nombre,-id_cliente,-estado_cliente,-pais) 
+cor <- model.matrix(~0+., data=cor) 
+cor <- round(cor(cor),4)
+#write.csv(cor,"cor.csv")
+```
+
+```{r}
+corrplot::corrplot(cor,method = 'shade', order = 'AOE',
+         tl.srt=60,tl.col="black",cl.pos = 'b', addgrid.col = 'white')
+```
+
+
+# bases nuevas
+Los datos se dividen a transacciones y a clientes.
+```{r}
+transaccion <- base %>% select(id_cliente,año,mes,tipo_transaccion,nombre_comercio,giro_nombre,
+                               mcc_nombre,ope_pais,entry_mode,monto_transaccion,continente,pais)
+```
+En clientes quedan los 9,995 clientes (exluyendo a los 5 mencionados anteriormente).
+```{r}
+clientes <- base %>% select(id_cliente,sexo_cliente,edad_cliente,estado_cliente,Region)
+clientes <- distinct(clientes)
+```
+
+# Transacciones
+```{r}
+str(transaccion)
+```
+
+## ope_pais
+Hay 77 países, con 20 que tienen más de 100 transaccionees 
+```{r}
+transaccion %>% count(pais,ope_pais,sort = T)
+```
+
+
+
+
+## continente
+El continente que más tiene transacciones es Norte América.
+```{r}
+transaccion %>% count(continente,sort = T)
+```
+
+
+## entry mode
+Hay más transacciones con 'card present'
+```{r}
+transaccion %>% count(entry_mode,sort=T)
+```
+## Tipo Transaccion
+Hay más transacciones hechas con tarjetas de débito.
+```{r}
+transaccion %>% count(tipo_transaccion,sort=T)
+```
+## Monto
+
+```{r}
+quantile(transaccion$monto_transaccion)
+```
+Como podemos observar, la mayoría de las transaccionnes son menores a 1000.
+
+```{r}
+ggplot(transaccion,aes(monto_transaccion)) + geom_histogram(color="#E58B8F",fill="#EBA6A9") +theme_light() +
+  labs(title="monto_transaccion",subtitle = "")  +xlab("")+ylab("") 
+```
+
+
+# Clientes
+
+## Region 
+Hay más clientes de en la Región Centro
+```{r}
+clientes %>% count(Region,sort=T)
+```
+
+
+## Sexo
+
+```{r}
+clientes %>% count(sexo_cliente,sort = T)
+```
+
+
+## Edad
+El rango de 18 a 83.
+```{r}
+quantile(clientes$edad_cliente)
+```
+
+```{r}
+ggplot(clientes,aes(edad_cliente)) + geom_histogram(color="#E58B8F",fill="#EBA6A9") +theme_light() +
+  labs(title="Edad Cliente",subtitle = "Entre 18 y 83")  +xlab("")+ylab("") 
+```
+
+
+
+
+# Transacciones
+
+```{r}
+antiguedad <- base %>%  group_by(id_cliente) %>% 
+  mutate(first_sale = min(fecha_transaccion),
+    last_sale = max(fecha_transaccion)) %>% select(id_cliente,first_sale,last_sale) %>% ungroup()
+antiguedad <- distinct(antiguedad)
+```
+466 clientes cuya última transacción fue en 2022
+```{r}
+antiguedad %>% mutate(Rango=as.numeric(round(difftime(last_sale,first_sale)/86400,0))) %>% arrange((desc(Rango))) %>% filter(last_sale > as.POSIXct("2023-01-01 00:00:00"))
+```
+
+Se crea una base de datos que mide el resumen de transacciones de los clientes
+```{r}
+transacciones_clientes <- base %>% select(id_cliente,negocio,tipo_transaccion,fecha_transaccion,giro_nombre,
+                         continente,sexo_cliente,edad_cliente,monto_transaccion,Region)
+transacciones_clientes2 <- transacciones_clientes %>% count(id_cliente,sort = T) %>% rename(Cant_Trans = n)
+```
+
+```{r}
+transacciones_clientes <- merge(transacciones_clientes,transacciones_clientes2,by.x=c("id_cliente"),by.y=c("id_cliente"))
+```
+Se crean las variables de la fecha de la primera y última transacción por cliente, el monto de la venta mayor y menor y la suma de todas las transacciones. También se crea una variable que mide la cantidad de días entre la primera y última transacción, así como un promedio del monto gastado por transacción.
+```{r}
+transacciones_clientes %<>% group_by(id_cliente) %>% 
+  mutate(first_sale = min(fecha_transaccion),
+    last_sale = max(fecha_transaccion),
+    venta_mayor = max(monto_transaccion),
+    venta_menor = min(monto_transaccion),
+    m_total= sum(monto_transaccion)) %>% 
+  mutate(Rango=difftime(last_sale,first_sale),
+         Promedio = round(m_total/Cant_Trans,2)) %>% 
+  ungroup() %>% 
+  dplyr::select(-monto_transaccion,-fecha_transaccion,-giro_nombre,-tipo_transaccion,-continente,-negocio)
+```
+```{r}
+transacciones_clientes <- transacciones_clientes %>% mutate(Rango = round(as.numeric(Rango/86400),0))
+```
+Nuevamente tenemos los 9,995 registros de los clientes.
+```{r}
+transacciones_clientes <- distinct(transacciones_clientes)
+```
+
+# Clúster Demográficos
+Creación de Cluster para visualización y estrategia 
+```{r}
+#define one-hot encoding function
+dummy <- dummyVars(" ~ sexo_cliente+Region", data=transacciones_clientes)
+
+#perform one-hot encoding on data frame
+final_df <- data.frame(predict(dummy, newdata=transacciones_clientes))
+
+df_all <- cbind(final_df, transacciones_clientes)
+df_all <- select(df_all,-first_sale,-last_sale,-sexo_cliente,-Region)
+```
+
+```{r}
+datos <- df_all 
+datos1 <- scale(datos)
+```
+
+```{r}
+dendogram <- dist(datos1, method = "euclidean")
+```
+
+```{r}
+HC <- factoextra::hcut(dendogram, k=4, hc_method = "ward.D")
+```
+
+```{r}
+datos$ClusterHC2<-as.factor(HC$cluster)
+```
+
+
+```{r}
+Tabla1<-datos %>%
+  summarize("n"=n(), 
+            "sexo_cliente.F"=round(mean(sexo_cliente.F),1),
+            "sexo_cliente.M"=round(mean(sexo_cliente.M),1),
+            "Region.Centro"=round(mean(Region.Centro),1),
+            "Region.Centro.Norte"=round(mean(Region.Centro.Norte),1),
+            "Region.Norte"=round(mean(Region.Norte),1),
+            "Region.Sur"=round(mean(Region.Sur),1),
+            "edad_cliente"=round(mean(edad_cliente),1),
+            "venta_mayor"=round(mean(venta_mayor),1),
+            "Cant_Trans"=round(mean(Cant_Trans),1),
+            "venta_menor"=round(mean(venta_menor),1),
+            "m_total"=round(mean(m_total),1),
+            "Rango"=round(mean(Rango)))
+Tabla2<-datos %>%
+  group_by(ClusterHC2) %>%
+  summarize("n"=n(), 
+            "sexo_cliente.F"=round(mean(sexo_cliente.F),1),
+            "sexo_cliente.M"=round(mean(sexo_cliente.M),1),
+            "Region.Centro"=round(mean(Region.Centro),1),
+            "Region.Centro.Norte"=round(mean(Region.Centro.Norte),1),
+            "Region.Norte"=round(mean(Region.Norte),1),
+            "Region.Sur"=round(mean(Region.Sur),1),
+            "edad_cliente"=round(mean(edad_cliente),1),
+            "venta_mayor"=round(mean(venta_mayor),1),
+            "Cant_Trans"=round(mean(Cant_Trans),1),
+            "venta_menor"=round(mean(venta_menor),1),
+            "m_total"=round(mean(m_total),1),
+            "Rango"=round(mean(Rango),1)) 
+```
+Hallazgos de los clusters, el na es la base de datos entera.
+```{r}
+TablaK <-bind_rows(Tabla1, Tabla2) # Unión de las tablas
+TablaK
+```
+

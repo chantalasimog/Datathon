@@ -1,0 +1,166 @@
+---
+title: "Clústers con Enfoque a Transacciones"
+author: "Data Genies"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load("readr","sqldf","ggplot2","dplyr","openxlsx","magrittr","skimr")
+data <- readxl::read_excel("/Users/carolina/Desktop/dataton/dataset.xlsx")
+df <- data
+```
+
+```{r}
+# LIMPIEZA DE ID CLIENTES Y EDAD DE CLIENTES
+df %<>% filter(!id_cliente%in%c("982","1410","2617","5530","6458")) #144 transacciones
+df %<>% mutate(edad_cliente = ifelse(edad_cliente > 85 | edad_cliente < 18,33,edad_cliente))
+```
+
+```{r}
+glimpse(df)
+```
+
+# **FEATURE ENGINEERING**
+```{r REGIÓN}
+# CREACIÓN DE VARIABLE REGIÓN 
+df %<>%  mutate(region= as.factor(ifelse(estado_cliente%in%c("CIUDAD DE MEXICO", "MEXICO", "GUANAJUATO",
+                                                         "HIDALGO", "MORELOS", "PUEBLA", "QUERETARON","TLAXCALA"),"Centro", 
+                                            
+                                            ifelse(estado_cliente%in%c("AGUASCALIENTES", "BAJA CALIFORNIA SUR", "COLIMA", "DURANGO", 
+                                                                "JALISCO","MICHOACAN DE OCAMPO", "NAYARIT",
+                                                                
+                                                                "SAN LUIS POTOSI", "SINALOA", "ZACATECAS"),"Centro Norte",
+                                                   
+                                                   ifelse(estado_cliente%in% c("CAMPECHE","CHIAPAS","GUERRERO","OAXACA","QUINTANA ROO",
+                                                                        "TABASCO","VERACRUZ DE IGNACIO DE LA LLAV","YUCATAN"),"Sur",
+                                                          
+                                                          ifelse(estado_cliente%in%c("BAJA CALIFORNIA", "CHIHUAHA", "COAHUILA", "NUEVO LEON",
+                                                                              "SONORA", "TAMAULIPAS" ),"Norte","Otro"))))))
+```
+
+```{r FECHAS}
+# FECHASS
+df %<>% mutate( año = as.factor(format(df$fecha_transaccion, "%Y")),
+                mes = as.factor(format(df$fecha_transaccion, "%m")),
+                hora = as.numeric(format(df$fecha_transaccion, "%H"))) %>%
+  mutate(horarios=as.factor(ifelse(hora > 11,"PM","AM")))
+```
+
+```{r}
+df$mcc_nombre<-toupper(df$mcc_nombre)
+df$mcc_nombre<-iconv(df$mcc_nombre,to="ASCII//TRANSLIT")
+df$mcc_nombre<-gsub("'",'',df$mcc_nombre)
+```
+
+```{r}
+df$tipo_transaccion <- as.factor(df$tipo_transaccion)
+df$giro_nombre <- as.factor(df$giro_nombre)
+df$ope_pais <- as.factor(df$ope_pais)
+df$entry_mode <- as.factor(df$entry_mode)
+df$sexo_cliente <- as.factor(df$sexo_cliente)
+df$pais <- as.factor(df$pais)
+df$continente <- as.factor(df$continente)
+```
+
+```{r}
+# Separación por semanas 
+df %<>% mutate( dia = as.numeric(format(df$fecha_transaccion, "%d"))) %>% 
+  mutate(semanas= as.factor(ifelse(dia>=1 & dia<8, "semana1", 
+                                   ifelse(dia>=8 & dia<15,"semana2", 
+                                          ifelse(dia>=15 & dia<23,"semana3", 
+                                                 ifelse(dia>=23 & dia<32,"semana4",NA))))))
+```
+
+```{r}
+summary(df$monto_transaccion)
+#  Min. 1st Qu.  Median    Mean  3rd Qu.   Max. 
+# 10.00   48.37   98.53  171.50  224.02 5000.00 
+
+df %<>% mutate(gastos=as.factor(ifelse(monto_transaccion < 48.37,"Gasto Hormiga","Gasto Superior")))
+```
+
+# *Clusters* 
+
+```{r}
+## ONE HOT ENCODING
+data <- df %>% 
+  mutate(tipo_transaccion = as.numeric(ifelse(tipo_transaccion == "TDC","1","0")), #tipo_transaccion: TDC 1 - TDD 0
+         pais = as.numeric(ifelse(pais == "México","1","0")), #pais = México 1 - 0 
+         entry_mode = as.numeric(ifelse(entry_mode == "CARD PRESENT","1","0")), #entry_mode = CARD PRESENT 1
+         horarios = as.numeric(ifelse(horarios == "AM","1","0")),
+         gastos = as.numeric(ifelse(gastos == "Gasto Superior","1","0"))) #Horarios = am 1
+```
+
+```{r}
+data %<>% select(tipo_transaccion,pais,entry_mode,horarios,gastos,monto_transaccion,mes,semanas) # variables numericas de interes
+```
+**Aquí es importante correr los clusters por cada mes*.*
+```{r}
+# no se puede ver mensual por temas de memoria de la computadora
+# se hace el filtrado semanal para tener menos datos que procesar 
+data_num <- data %>% filter(mes == "02") # Cambiarlo 
+data_num <- data_num[,unlist(lapply(data_num, is.numeric))] 
+summary(data_num)
+```
+
+# **Creación de Clusters** 
+
+```{r warning=FALSE}
+datos <- data_num 
+datos1 <- scale(datos)
+```
+
+```{r warning=FALSE}
+## Se esta utilizando el modelo jerárquico con el metodo de euclidean
+dendogram <- dist(datos1, method = "euclidean")
+HC <- factoextra::hcut(dendogram, k=3, hc_method = "ward.D") # Algoritmo
+datos$ClusterHC<-HC$cluster 
+```
+
+
+```{r}
+# str(data)
+Tabla1<-datos %>%
+  summarize("n"=n(), 
+            "tipo_transaccion"=round(mean(tipo_transaccion),1),
+            "Mexico"=round(mean(pais),1),
+            "Card_present"=round(mean(entry_mode),1),
+            "horarios"=round(mean(horarios),1),
+            "tipo_gastos"=round(mean(gastos),1),
+            "monto_transaccion"=round(mean(monto_transaccion),1)) 
+
+Tabla2<-datos %>%
+  group_by(ClusterHC) %>% 
+  summarize("n"=n(), 
+            "tipo_transaccion"=round(mean(tipo_transaccion),1),
+            "Mexico"=round(mean(pais),1),
+            "Card_present"=round(mean(entry_mode),1),
+            "horarios"=round(mean(horarios),1),
+            "tipo_gastos"=round(mean(gastos),1),
+            "monto_transaccion"=round(mean(monto_transaccion),1))
+```
+
+## Unión de resultados y escrito en excel 
+```{r}
+TablaK <-bind_rows(Tabla1, Tabla2) # Unión de las tablas
+TablaK
+```
+# **Hallazgos**
+
+Se realizaron clúster sobre las transacciones de los clientes donde se encontraron lo siguiente: Grupo 1 Grupo 2 Grupo 3
+Con los insights obtenidos de la segmentación de clusters, podemos generar soluciones personalizadas para cada grupo que ayuden a mejorar su salud financiera. Algunas posibles soluciones son:
+Para el Grupo 1:
+• Ofrecer promociones y descuentos en productos de bajo costo para fomentar el ahorro y controlar los gastos hormigas.
+• Brindar información educativa sobre finanzas personales y cómo administrar de manera eficiente los gastos.
+Para el Grupo 2:
+• Ofrecer programas de recompensas o cashback que incentiven a los clientes a seguir utilizando sus tarjetas de crédito, pero de manera consciente y responsable.
+• Proporcionar asesoramiento financiero personalizado y herramientas de seguimiento de gastos para ayudarles a tomar decisiones financieras informadas.
+Para el Grupo 3:
+• Ofrecer productos de ahorro o inversión que puedan ayudarles a hacer crecer su dinero.
+• Brindar información educativa sobre cómo utilizar las tarjetas de débito de manera segura y
+responsable, y cómo planificar mejor sus gastos para evitar el sobreendeudamiento.
